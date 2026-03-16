@@ -1,3 +1,4 @@
+import { state } from "~/lib/state"
 import {
   type ChatCompletionResponse,
   type ChatCompletionsPayload,
@@ -46,14 +47,58 @@ export function translateToOpenAI(
   }
 }
 
-function translateModelName(model: string): string {
-  // Subagent requests use a specific model number which Copilot doesn't support
-  if (model.startsWith("claude-sonnet-4-")) {
-    return model.replace(/^claude-sonnet-4-.*/, "claude-sonnet-4")
-  } else if (model.startsWith("claude-opus-")) {
-    return model.replace(/^claude-opus-4-.*/, "claude-opus-4")
+/**
+ * Translate Anthropic/Claude model names to the format expected by Copilot backend.
+ *
+ * Claude Code sends model names like:
+ *   claude-opus-4-6          (dashes, no date)
+ *   claude-opus-4-6[1m]     (1M context suffix — Claude Code convention)
+ *   claude-haiku-4-5-20251001 (dated model IDs from SDK resolution)
+ *
+ * Copilot backend expects:
+ *   claude-opus-4.6          (dots for minor version)
+ *   claude-opus-4.6-1m      (dash-1m for 1M context)
+ *   claude-haiku-4.5         (no date suffix)
+ *
+ * Steps:
+ *   1. Strip [1m] suffix (Claude Code convention) and remember it
+ *   2. Convert dashes to dots for version: claude-{family}-{major}-{minor}[-date] → claude-{family}-{major}.{minor}
+ *   3. Auto-upgrade to -1m variant if the model list includes it
+ *   4. Pass through already-dotted or non-Claude names unchanged
+ */
+export function translateModelName(model: string): string {
+  // Strip Claude Code's [1m] context window suffix
+  const wants1m = model.endsWith("[1m]")
+  const name = wants1m ? model.slice(0, -4) : model
+
+  let result: string
+
+  if (/\.\d/.test(name)) {
+    // Already in dotted format (e.g. claude-opus-4.6) — pass through
+    result = name
+  } else {
+    // Try: claude-{family}-{major}-{minor}[-date][-suffix]
+    const m = name.match(
+      /^(claude-(?:opus|sonnet|haiku)-\d+)-(\d{1,2})(?:-\d{6,})?(-.*)?$/,
+    )
+    if (m) {
+      result = `${m[1]}.${m[2]}${m[3] || ""}`
+    } else {
+      // Try: claude-{family}-{major}-{date} (no minor version)
+      const m2 = name.match(/^(claude-(?:opus|sonnet|haiku)-\d+)-\d{6,}$/)
+      result = m2 ? m2[1] : name
+    }
   }
-  return model
+
+  // Auto-upgrade to 1M context variant if available in the model list
+  if (wants1m) {
+    const r1m = result.replace(/-1m$/, "") + "-1m"
+    if (state.models?.data.some((m) => m.id === r1m)) {
+      return r1m
+    }
+  }
+
+  return result
 }
 
 function translateAnthropicMessagesToOpenAI(
