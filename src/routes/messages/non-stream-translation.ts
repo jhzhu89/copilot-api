@@ -51,25 +51,27 @@ export function translateToOpenAI(
  * Translate Anthropic/Claude model names to the format expected by Copilot backend.
  *
  * Claude Code sends model names like:
- *   claude-opus-4-6          (dashes, no date)
- *   claude-opus-4-6[1m]     (1M context suffix — Claude Code convention)
+ *   claude-opus-4-6          (dashes, no date — the common case)
+ *   claude-opus-4-6[1m]     (rare: only from API-key verification probe)
  *   claude-haiku-4-5-20251001 (dated model IDs from SDK resolution)
  *
+ * Note: Claude Code's nB() strips [1m] before normal API calls, so the proxy
+ * almost never sees it. The [1m] suffix is used internally by Claude Code for
+ * context window sizing only.
+ *
  * Copilot backend expects:
- *   claude-opus-4.6          (dots for minor version)
- *   claude-opus-4.6-1m      (dash-1m for 1M context)
+ *   claude-opus-4.6-1m      (dots for minor version, -1m for 1M context)
  *   claude-haiku-4.5         (no date suffix)
  *
  * Steps:
- *   1. Strip [1m] suffix (Claude Code convention) and remember it
+ *   1. Strip [1m] suffix if present (normalize input)
  *   2. Convert dashes to dots for version: claude-{family}-{major}-{minor}[-date] → claude-{family}-{major}.{minor}
- *   3. Auto-upgrade to -1m variant if the model list includes it
+ *   3. Always promote to -1m variant if available in the model list
  *   4. Pass through already-dotted or non-Claude names unchanged
  */
 export function translateModelName(model: string): string {
-  // Strip Claude Code's [1m] context window suffix
-  const wants1m = model.endsWith("[1m]")
-  const name = wants1m ? model.slice(0, -4) : model
+  // Strip Claude Code's [1m] context window suffix if present
+  const name = model.endsWith("[1m]") ? model.slice(0, -4) : model
 
   let result: string
 
@@ -90,12 +92,12 @@ export function translateModelName(model: string): string {
     }
   }
 
-  // Auto-upgrade to 1M context variant if available in the model list
-  if (wants1m) {
-    const r1m = result.replace(/-1m$/, "") + "-1m"
-    if (state.models?.data.some((m) => m.id === r1m)) {
-      return r1m
-    }
+  // Always auto-upgrade to 1M context variant if available in the model list.
+  // Claude Code rarely sends the [1m] suffix, so we upgrade unconditionally
+  // to ensure the largest context window is used.
+  const r1m = result.replace(/-1m$/, "") + "-1m"
+  if (r1m !== result && state.models?.data.some((m) => m.id === r1m)) {
+    return r1m
   }
 
   return result

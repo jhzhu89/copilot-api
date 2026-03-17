@@ -15,7 +15,7 @@ describe("translateModelName", () => {
       expect(translateModelName("gpt-5.1")).toBe("gpt-5.1")
     })
 
-    test("already-dotted Claude names pass through", () => {
+    test("already-dotted Claude names pass through when no model list", () => {
       expect(translateModelName("claude-opus-4.6")).toBe("claude-opus-4.6")
       expect(translateModelName("claude-sonnet-4.5")).toBe("claude-sonnet-4.5")
       expect(translateModelName("claude-opus-4.6-1m")).toBe(
@@ -53,6 +53,120 @@ describe("translateModelName", () => {
     })
   })
 
+  describe("auto-upgrade to -1m (always, not just with [1m] suffix)", () => {
+    test("auto-upgrades claude-opus-4-6 to -1m when available", () => {
+      state.models = {
+        data: [
+          { id: "claude-opus-4.6", object: "model", type: "model", created: 0 },
+          {
+            id: "claude-opus-4.6-1m",
+            object: "model",
+            type: "model",
+            created: 0,
+          },
+        ],
+      }
+
+      expect(translateModelName("claude-opus-4-6")).toBe("claude-opus-4.6-1m")
+    })
+
+    test("auto-upgrades claude-sonnet-4-6 to -1m when available", () => {
+      state.models = {
+        data: [
+          {
+            id: "claude-sonnet-4.6",
+            object: "model",
+            type: "model",
+            created: 0,
+          },
+          {
+            id: "claude-sonnet-4.6-1m",
+            object: "model",
+            type: "model",
+            created: 0,
+          },
+        ],
+      }
+
+      expect(translateModelName("claude-sonnet-4-6")).toBe(
+        "claude-sonnet-4.6-1m",
+      )
+    })
+
+    test("auto-upgrades already-dotted claude-opus-4.6 to -1m when available", () => {
+      state.models = {
+        data: [
+          { id: "claude-opus-4.6", object: "model", type: "model", created: 0 },
+          {
+            id: "claude-opus-4.6-1m",
+            object: "model",
+            type: "model",
+            created: 0,
+          },
+        ],
+      }
+
+      expect(translateModelName("claude-opus-4.6")).toBe("claude-opus-4.6-1m")
+    })
+
+    test("auto-upgrades already-dotted claude-sonnet-4.6 to -1m when available", () => {
+      state.models = {
+        data: [
+          {
+            id: "claude-sonnet-4.6",
+            object: "model",
+            type: "model",
+            created: 0,
+          },
+          {
+            id: "claude-sonnet-4.6-1m",
+            object: "model",
+            type: "model",
+            created: 0,
+          },
+        ],
+      }
+
+      expect(translateModelName("claude-sonnet-4.6")).toBe(
+        "claude-sonnet-4.6-1m",
+      )
+    })
+
+    test("does not upgrade when -1m variant not in model list", () => {
+      state.models = {
+        data: [
+          { id: "claude-opus-4.6", object: "model", type: "model", created: 0 },
+        ],
+      }
+
+      expect(translateModelName("claude-opus-4-6")).toBe("claude-opus-4.6")
+    })
+
+    test("does not upgrade when no model list loaded", () => {
+      expect(translateModelName("claude-opus-4-6")).toBe("claude-opus-4.6")
+    })
+
+    test("does not double-upgrade already -1m names", () => {
+      state.models = {
+        data: [
+          {
+            id: "claude-opus-4.6-1m",
+            object: "model",
+            type: "model",
+            created: 0,
+          },
+        ],
+      }
+
+      expect(translateModelName("claude-opus-4.6-1m")).toBe(
+        "claude-opus-4.6-1m",
+      )
+      expect(translateModelName("claude-opus-4-6-1m")).toBe(
+        "claude-opus-4.6-1m",
+      )
+    })
+  })
+
   describe("[1m] suffix handling", () => {
     test("strips [1m] and converts model name", () => {
       expect(translateModelName("claude-opus-4-6[1m]")).toBe("claude-opus-4.6")
@@ -74,16 +188,6 @@ describe("translateModelName", () => {
       expect(translateModelName("claude-opus-4-6[1m]")).toBe(
         "claude-opus-4.6-1m",
       )
-    })
-
-    test("falls back to base model when -1m not in model list", () => {
-      state.models = {
-        data: [
-          { id: "claude-opus-4.6", object: "model", type: "model", created: 0 },
-        ],
-      }
-
-      expect(translateModelName("claude-opus-4-6[1m]")).toBe("claude-opus-4.6")
     })
 
     test("[1m] on already-dotted name", () => {
