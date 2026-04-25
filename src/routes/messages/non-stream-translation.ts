@@ -95,9 +95,20 @@ export function translateModelName(model: string): string {
   // Always auto-upgrade to 1M context variant if available in the model list.
   // Claude Code rarely sends the [1m] suffix, so we upgrade unconditionally
   // to ensure the largest context window is used.
-  const r1m = result.replace(/-1m$/, "") + "-1m"
-  if (r1m !== result && state.models?.data.some((m) => m.id === r1m)) {
-    return r1m
+  //
+  // Some models expose 1M as `-1m` (e.g. claude-opus-4.6-1m), others as
+  // `-1m-internal` while still in preview (e.g. claude-opus-4.7-1m-internal).
+  // Try both suffixes in order of preference.
+  const base = result.replace(/-1m(?:-internal)?$/, "")
+  if (base !== result) {
+    // Already a 1m variant — pass through.
+    return result
+  }
+  for (const suffix of ["-1m", "-1m-internal"]) {
+    const candidate = base + suffix
+    if (state.models?.data.some((m) => m.id === candidate)) {
+      return candidate
+    }
   }
 
   return result

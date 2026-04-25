@@ -220,3 +220,69 @@ describe("translateModelName", () => {
     })
   })
 })
+
+describe("translateModelName -1m-internal fallback", () => {
+  beforeEach(() => {
+    state.models = undefined
+  })
+
+  test("falls back to -1m-internal when -1m not present (e.g. claude-opus-4.7)", () => {
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7", object: "model", type: "model", created: 0 },
+        {
+          id: "claude-opus-4.7-1m-internal",
+          object: "model",
+          type: "model",
+          created: 0,
+        },
+      ],
+    }
+
+    expect(translateModelName("claude-opus-4-7")).toBe(
+      "claude-opus-4.7-1m-internal",
+    )
+    expect(translateModelName("claude-opus-4.7")).toBe(
+      "claude-opus-4.7-1m-internal",
+    )
+  })
+
+  test("prefers -1m over -1m-internal when both available", () => {
+    state.models = {
+      data: [
+        { id: "claude-opus-4.7", object: "model", type: "model", created: 0 },
+        {
+          id: "claude-opus-4.7-1m",
+          object: "model",
+          type: "model",
+          created: 0,
+        },
+        {
+          id: "claude-opus-4.7-1m-internal",
+          object: "model",
+          type: "model",
+          created: 0,
+        },
+      ],
+    }
+
+    expect(translateModelName("claude-opus-4-7")).toBe("claude-opus-4.7-1m")
+  })
+
+  test("passes through -1m-internal names without double-upgrade", () => {
+    state.models = {
+      data: [
+        {
+          id: "claude-opus-4.7-1m-internal",
+          object: "model",
+          type: "model",
+          created: 0,
+        },
+      ],
+    }
+
+    expect(translateModelName("claude-opus-4.7-1m-internal")).toBe(
+      "claude-opus-4.7-1m-internal",
+    )
+  })
+})
