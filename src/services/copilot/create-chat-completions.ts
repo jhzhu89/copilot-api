@@ -2,6 +2,7 @@ import consola from "consola"
 import { events } from "fetch-event-stream"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
+import { copilotFetch } from "~/lib/copilot-fetch"
 import { HTTPError } from "~/lib/error"
 import { state } from "~/lib/state"
 
@@ -22,17 +23,21 @@ export const createChatCompletions = async (
     ["assistant", "tool"].includes(msg.role),
   )
 
-  // Build headers and add X-Initiator
-  const headers: Record<string, string> = {
-    ...copilotHeaders(state, enableVision),
-    "X-Initiator": isAgentCall ? "agent" : "user",
-  }
-
-  const response = await fetch(`${copilotBaseUrl(state)}/chat/completions`, {
+  const body = JSON.stringify(payload)
+  // Build headers fresh on each attempt so a refreshed token is picked up.
+  const buildInit = (): RequestInit => ({
     method: "POST",
-    headers,
-    body: JSON.stringify(payload),
+    headers: {
+      ...copilotHeaders(state, enableVision),
+      "X-Initiator": isAgentCall ? "agent" : "user",
+    },
+    body,
   })
+
+  const response = await copilotFetch(
+    `${copilotBaseUrl(state)}/chat/completions`,
+    buildInit,
+  )
 
   if (!response.ok) {
     consola.error("Failed to create chat completions", response)

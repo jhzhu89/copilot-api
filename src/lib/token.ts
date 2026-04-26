@@ -26,7 +26,28 @@ export const setupCopilotToken = async () => {
   }
 
   const refreshInterval = (refresh_in - 60) * 1000
-  setInterval(async () => {
+  setInterval(() => {
+    void refreshCopilotToken().catch(() => {
+      // Errors already logged inside refreshCopilotToken; swallow so the
+      // interval keeps firing and the next on-demand 401 retry can recover.
+    })
+  }, refreshInterval)
+}
+
+let inFlightRefresh: Promise<boolean> | undefined
+
+/**
+ * Refresh the short-lived Copilot token. Safe to call concurrently — overlapping
+ * callers share the same in-flight promise. Returns true on success.
+ *
+ * Used both by the periodic timer in `setupCopilotToken` and by `copilotFetch`
+ * when an upstream request returns 401 (e.g. after the host machine wakes from
+ * sleep and the cached token has expired).
+ */
+export const refreshCopilotToken = async (): Promise<boolean> => {
+  if (inFlightRefresh) return inFlightRefresh
+
+  inFlightRefresh = (async () => {
     const maxRetries = 3
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
@@ -39,7 +60,7 @@ export const setupCopilotToken = async () => {
         if (state.showToken) {
           consola.info("Refreshed Copilot token:", token)
         }
-        return
+        return true
       } catch (error) {
         consola.error(
           `Failed to refresh Copilot token (attempt ${attempt}/${maxRetries}):`,
@@ -49,14 +70,16 @@ export const setupCopilotToken = async () => {
           const delay = attempt * 5000
           consola.warn(`Retrying in ${delay / 1000}s...`)
           await new Promise((resolve) => setTimeout(resolve, delay))
-        } else {
-          consola.error(
-            "All retry attempts exhausted. Will retry on next scheduled interval.",
-          )
         }
       }
     }
-  }, refreshInterval)
+    consola.error("All Copilot token refresh attempts exhausted.")
+    return false
+  })().finally(() => {
+    inFlightRefresh = undefined
+  })
+
+  return inFlightRefresh
 }
 
 interface SetupGitHubTokenOptions {

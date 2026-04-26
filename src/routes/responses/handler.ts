@@ -6,6 +6,7 @@ import { streamSSE } from "hono/streaming"
 
 import { copilotHeaders, copilotBaseUrl } from "~/lib/api-config"
 import { awaitApproval } from "~/lib/approval"
+import { copilotFetch } from "~/lib/copilot-fetch"
 import { HTTPError } from "~/lib/error"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
@@ -30,18 +31,20 @@ export async function handleResponses(c: Context) {
 
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const headers: Record<string, string> = {
-    ...copilotHeaders(state),
-    "X-Initiator": "agent",
-  }
-
+  const body = JSON.stringify(payload)
   const isStreaming = payload.stream === true
 
-  const response = await fetch(`${copilotBaseUrl(state)}/responses`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify(payload),
-  })
+  const response = await copilotFetch(
+    `${copilotBaseUrl(state)}/responses`,
+    () => ({
+      method: "POST",
+      headers: {
+        ...copilotHeaders(state),
+        "X-Initiator": "agent",
+      },
+      body,
+    }),
+  )
 
   if (!response.ok) {
     consola.error(
