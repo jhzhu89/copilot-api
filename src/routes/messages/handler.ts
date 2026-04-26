@@ -26,6 +26,11 @@ export async function handleCompletion(c: Context) {
   await checkRateLimit(state)
 
   const anthropicPayload = await c.req.json<AnthropicMessagesPayload>()
+
+  if (anthropicPayload.thinking?.type === "adaptive") {
+    anthropicPayload.thinking.type = "enabled"
+  }
+
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
   const openAIPayload = translateToOpenAI(anthropicPayload)

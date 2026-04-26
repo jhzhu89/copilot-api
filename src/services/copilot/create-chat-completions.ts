@@ -153,6 +153,10 @@ export interface ChatCompletionsPayload {
     | { type: "function"; function: { name: string } }
     | null
   user?: string | null
+  thinking?: {
+    type: "enabled" | "disabled"
+    budget_tokens?: number
+  }
 }
 
 export interface Tool {
