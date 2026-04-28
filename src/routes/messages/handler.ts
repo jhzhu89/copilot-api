@@ -33,7 +33,15 @@ export async function handleCompletion(c: Context) {
 
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
-  const openAIPayload = translateToOpenAI(anthropicPayload)
+  // Detect whether the client requested 1M context via the anthropic-beta header.
+  // Claude Code sends e.g. "context-1m-2025-08-07" in the comma-separated beta list
+  // when it has decided to use the 1M context window. This is the source of truth
+  // for promoting to the -1m model variant on the Copilot side.
+  const betaHeader =
+    c.req.header("anthropic-beta") ?? c.req.header("Anthropic-Beta") ?? ""
+  const wants1M = /(?:^|,)\s*context-1m-/i.test(betaHeader)
+
+  const openAIPayload = translateToOpenAI(anthropicPayload, { wants1M })
   consola.debug(
     "Translated OpenAI request payload:",
     JSON.stringify(openAIPayload),

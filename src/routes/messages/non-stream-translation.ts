@@ -29,9 +29,10 @@ import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 export function translateToOpenAI(
   payload: AnthropicMessagesPayload,
+  options?: { wants1M?: boolean },
 ): ChatCompletionsPayload {
   const result: ChatCompletionsPayload = {
-    model: translateModelName(payload.model),
+    model: translateModelName(payload.model, options),
     messages: translateAnthropicMessagesToOpenAI(
       payload.messages,
       payload.system,
@@ -62,28 +63,23 @@ export function translateToOpenAI(
 /**
  * Translate Anthropic/Claude model names to the format expected by Copilot backend.
  *
- * Claude Code sends model names like:
- *   claude-opus-4-6          (dashes, no date — the common case)
- *   claude-opus-4-6[1m]     (rare: only from API-key verification probe)
- *   claude-haiku-4-5-20251001 (dated model IDs from SDK resolution)
- *
- * Note: Claude Code's nB() strips [1m] before normal API calls, so the proxy
- * almost never sees it. The [1m] suffix is used internally by Claude Code for
- * context window sizing only.
- *
- * Copilot backend expects:
- *   claude-opus-4.6-1m      (dots for minor version, -1m for 1M context)
- *   claude-haiku-4.5         (no date suffix)
- *
- * Steps:
- *   1. Strip [1m] suffix if present (normalize input)
- *   2. Convert dashes to dots for version: claude-{family}-{major}-{minor}[-date] → claude-{family}-{major}.{minor}
- *   3. Always promote to -1m variant if available in the model list
- *   4. Pass through already-dotted or non-Claude names unchanged
+ * 1:1 mapping driven by client intent:
+ *   - If the client signals 1M context (via [1m] suffix in model name OR via the
+ *     `context-1m-2025-08-07` anthropic-beta header), we promote to the `-1m` /
+ *     `-1m-internal` variant when present in the Copilot model list.
+ *   - Otherwise we keep the standard 200K variant. We do NOT silently upgrade
+ *     non-1M requests, because that breaks calls like the API-key verification
+ *     probe that intentionally use the small/standard model.
  */
-export function translateModelName(model: string): string {
+export function translateModelName(
+  model: string,
+  options?: { wants1M?: boolean },
+): string {
+  const hasBracketSuffix = model.endsWith("[1m]")
+  const wants1M = options?.wants1M === true || hasBracketSuffix
+
   // Strip Claude Code's [1m] context window suffix if present
-  const name = model.endsWith("[1m]") ? model.slice(0, -4) : model
+  const name = hasBracketSuffix ? model.slice(0, -4) : model
 
   let result: string
 
@@ -104,17 +100,16 @@ export function translateModelName(model: string): string {
     }
   }
 
-  // Always auto-upgrade to 1M context variant if available in the model list.
-  // Claude Code rarely sends the [1m] suffix, so we upgrade unconditionally
-  // to ensure the largest context window is used.
-  //
-  // Some models expose 1M as `-1m` (e.g. claude-opus-4.6-1m), others as
-  // `-1m-internal` while still in preview (e.g. claude-opus-4.7-1m-internal).
-  // Try both suffixes in order of preference.
+  // If client did not request 1M, keep the standard variant.
+  // If the input was already a 1m variant, strip it back down.
+  if (!wants1M) {
+    return result.replace(/-1m(?:-internal)?$/, "")
+  }
+
+  // Client wants 1M: promote to -1m / -1m-internal variant if available.
   const base = result.replace(/-1m(?:-internal)?$/, "")
   if (base !== result) {
-    // Already a 1m variant — pass through.
-    return result
+    return result // already a 1m variant
   }
   for (const suffix of ["-1m", "-1m-internal"]) {
     const candidate = base + suffix
