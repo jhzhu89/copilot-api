@@ -29,10 +29,13 @@ import { mapOpenAIStopReasonToAnthropic } from "./utils"
 
 export function translateToOpenAI(
   payload: AnthropicMessagesPayload,
-  options?: { wants1M?: boolean },
+  options?: { wants1M?: boolean; effort?: string },
 ): ChatCompletionsPayload {
   const result: ChatCompletionsPayload = {
-    model: translateModelName(payload.model, options),
+    model: translateModelName(payload.model, {
+      wants1M: options?.wants1M,
+      effort: options?.effort,
+    }),
     messages: translateAnthropicMessagesToOpenAI(
       payload.messages,
       payload.system,
@@ -57,7 +60,44 @@ export function translateToOpenAI(
     }
   }
 
+  // For 1M models, effort is conveyed via reasoning_effort param (no model variants).
+  // For non-1M models, effort is conveyed via model variant promotion (handled in translateModelName).
+  if (options?.wants1M && options.effort) {
+    const mapped = mapEffortToReasoningEffort(options.effort)
+    if (mapped) {
+      result.reasoning_effort = mapped
+    }
+  }
+
   return result
+}
+
+/**
+ * Map CC CLI effort levels to Copilot reasoning_effort values.
+ * CC CLI sends: low, medium, high, xhigh, max
+ * Copilot accepts: low, medium, high, xhigh
+ */
+function mapEffortToReasoningEffort(effort: string): string | undefined {
+  switch (effort.toLowerCase()) {
+    case "low": {
+      return "low"
+    }
+    case "medium": {
+      return "medium"
+    }
+    case "high": {
+      return "high"
+    }
+    case "xhigh": {
+      return "xhigh"
+    }
+    case "max": {
+      return "xhigh"
+    }
+    default: {
+      return undefined
+    }
+  }
 }
 
 /**
@@ -73,7 +113,7 @@ export function translateToOpenAI(
  */
 export function translateModelName(
   model: string,
-  options?: { wants1M?: boolean },
+  options?: { wants1M?: boolean; effort?: string },
 ): string {
   const hasBracketSuffix = model.endsWith("[1m]")
   const wants1M = options?.wants1M === true || hasBracketSuffix
@@ -103,7 +143,11 @@ export function translateModelName(
   // If client did not request 1M, keep the standard variant.
   // If the input was already a 1m variant, strip it back down.
   if (!wants1M) {
-    return result.replace(/-1m(?:-internal)?$/, "")
+    const base = result.replace(/-1m(?:-internal)?$/, "")
+    // Promote to effort-specific model variant (e.g. claude-opus-4.7-high)
+    // when not using 1M context. 1M requests always use the -1m-internal
+    // variant and rely on reasoning_effort param instead.
+    return promoteModelByEffort(base, options?.effort)
   }
 
   // Client wants 1M: promote to -1m / -1m-internal variant if available.
@@ -119,6 +163,40 @@ export function translateModelName(
   }
 
   return result
+}
+
+/**
+ * Promote a base model to an effort-specific variant if available in the
+ * Copilot model list. Only applies to non-1M models — 1M models don't have
+ * effort-specific variants (e.g. no claude-opus-4.7-1m-internal-high).
+ *
+ * Mapping:
+ *   high  → base-high   (e.g. claude-opus-4.7-high)
+ *   xhigh / max → base-xhigh (e.g. claude-opus-4.7-xhigh)
+ *   low / medium / undefined → base (no promotion)
+ */
+function promoteModelByEffort(
+  base: string,
+  effort: string | undefined,
+): string {
+  if (!effort) return base
+
+  const e = effort.toLowerCase()
+  let suffix: string | undefined
+  if (e === "high") {
+    suffix = "-high"
+  } else if (e === "xhigh" || e === "max") {
+    suffix = "-xhigh"
+  }
+
+  if (!suffix) return base
+
+  const candidate = base + suffix
+  if (state.models?.data.some((m) => m.id === candidate)) {
+    return candidate
+  }
+
+  return base
 }
 
 function translateAnthropicMessagesToOpenAI(

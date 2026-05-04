@@ -157,6 +157,7 @@ export interface ChatCompletionsPayload {
     type: "enabled" | "disabled"
     budget_tokens?: number
   }
+  reasoning_effort?: string
 }
 
 export interface Tool {

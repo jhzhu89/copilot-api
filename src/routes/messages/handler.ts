@@ -41,7 +41,10 @@ export async function handleCompletion(c: Context) {
     c.req.header("anthropic-beta") ?? c.req.header("Anthropic-Beta") ?? ""
   const wants1M = /(?:^|,)\s*context-1m-/i.test(betaHeader)
 
-  const openAIPayload = translateToOpenAI(anthropicPayload, { wants1M })
+  // Extract effort level from output_config.effort (CC CLI sends this)
+  const effort = anthropicPayload.output_config?.effort
+
+  const openAIPayload = translateToOpenAI(anthropicPayload, { wants1M, effort })
   consola.debug(
     "Translated OpenAI request payload:",
     JSON.stringify(openAIPayload),
