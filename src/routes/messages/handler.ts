@@ -3,13 +3,17 @@ import type { Context } from "hono"
 import consola from "consola"
 import { streamSSE } from "hono/streaming"
 
+import type { Model } from "~/services/copilot/get-models"
+
 import { awaitApproval } from "~/lib/approval"
 import { checkRateLimit } from "~/lib/rate-limit"
 import { state } from "~/lib/state"
+import { getTokenCount } from "~/lib/tokenizer"
 import {
   createChatCompletions,
   type ChatCompletionChunk,
   type ChatCompletionResponse,
+  type ChatCompletionsPayload,
 } from "~/services/copilot/create-chat-completions"
 
 import {
@@ -34,9 +38,9 @@ export async function handleCompletion(c: Context) {
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
 
   // Detect whether the client requested 1M context via the anthropic-beta header.
-  // Claude Code sends e.g. "context-1m-2025-08-07" in the comma-separated beta list
-  // when it has decided to use the 1M context window. This is the source of truth
-  // for promoting to the -1m model variant on the Copilot side.
+  // CC CLI sends e.g. "context-1m-2025-08-07" for older models like opus-4.6.
+  // Newer models (opus-4.7) no longer use this header — translateModelName
+  // routes them to the 1M variant unconditionally based on the model list.
   const betaHeader =
     c.req.header("anthropic-beta") ?? c.req.header("Anthropic-Beta") ?? ""
   const wants1M = /(?:^|,)\s*context-1m-/i.test(betaHeader)
@@ -49,6 +53,26 @@ export async function handleCompletion(c: Context) {
     "Translated OpenAI request payload:",
     JSON.stringify(openAIPayload),
   )
+
+  // Pre-flight prompt token check.
+  // The Copilot backend rejects requests where the prompt exceeds
+  // max_prompt_tokens (verified empirically: e.g. 168467 > 168000 for
+  // claude-opus-4.7-xhigh returns 400 "prompt token count of N exceeds the
+  // limit of M"). Returning the error in Anthropic format up front lets the
+  // client surface a clean message instead of an opaque upstream 400.
+  //
+  // Other model spec fields (max_output_tokens, max_non_streaming_output_tokens,
+  // min/max_thinking_budget, adaptive_thinking) are NOT enforced by Copilot —
+  // requests with absurd values silently succeed. So we don't pre-clamp them.
+  const selectedModel = state.models?.data.find(
+    (m) => m.id === openAIPayload.model,
+  )
+  if (selectedModel) {
+    const tokenError = await checkPromptTokenLimit(openAIPayload, selectedModel)
+    if (tokenError) {
+      return c.json(tokenError, 400)
+    }
+  }
 
   if (state.manualApprove) {
     await awaitApproval()
@@ -100,6 +124,44 @@ export async function handleCompletion(c: Context) {
       }
     }
   })
+}
+
+/**
+ * Estimate prompt token count and return an Anthropic-format error object
+ * if the payload exceeds the model's max_prompt_tokens. Returns null if OK
+ * or if the limit is unknown.
+ */
+async function checkPromptTokenLimit(
+  payload: ChatCompletionsPayload,
+  model: Model,
+): Promise<{
+  type: string
+  error: { type: string; message: string }
+} | null> {
+  const maxPromptTokens = model.capabilities.limits?.max_prompt_tokens
+  if (!maxPromptTokens) return null
+
+  try {
+    const tokenCount = await getTokenCount(payload, model)
+    const estimated = tokenCount.input + tokenCount.output
+    if (estimated > maxPromptTokens) {
+      consola.warn(
+        `Prompt token pre-check failed: estimated ${estimated} exceeds limit ${maxPromptTokens} for model ${model.id}`,
+      )
+      return {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: `prompt token count of ${estimated} exceeds the limit of ${maxPromptTokens} for model ${model.id}. Consider compacting or reducing context.`,
+        },
+      }
+    }
+  } catch (err) {
+    // Non-fatal: if token counting fails, let the request through.
+    consola.warn("Pre-flight token count failed, skipping check:", err)
+  }
+
+  return null
 }
 
 const isNonStreaming = (

@@ -31,11 +31,15 @@ export function translateToOpenAI(
   payload: AnthropicMessagesPayload,
   options?: { wants1M?: boolean; effort?: string },
 ): ChatCompletionsPayload {
+  // wants1M is intentionally ignored here — translateModelName now decides
+  // 1M routing solely based on what Copilot advertises. The option is kept in
+  // the signature for backwards compatibility with callers that still pass it.
+  void options?.wants1M
+
+  const resolvedModel = translateModelName(payload.model)
+
   const result: ChatCompletionsPayload = {
-    model: translateModelName(payload.model, {
-      wants1M: options?.wants1M,
-      effort: options?.effort,
-    }),
+    model: resolvedModel,
     messages: translateAnthropicMessagesToOpenAI(
       payload.messages,
       payload.system,
@@ -60,9 +64,11 @@ export function translateToOpenAI(
     }
   }
 
-  // For 1M models, effort is conveyed via reasoning_effort param (no model variants).
-  // For non-1M models, effort is conveyed via model variant promotion (handled in translateModelName).
-  if (options?.wants1M && options.effort) {
+  // 1M model variants don't have effort-specific sub-variants (e.g. there is no
+  // claude-opus-4.7-1m-internal-xhigh). Effort is conveyed via the
+  // reasoning_effort parameter on the request body instead. Trigger this whenever
+  // the resolved model is a 1M variant — regardless of how we got there.
+  if (is1MVariant(resolvedModel) && options?.effort) {
     const mapped = mapEffortToReasoningEffort(options.effort)
     if (mapped) {
       result.reasoning_effort = mapped
@@ -74,7 +80,8 @@ export function translateToOpenAI(
 
 /**
  * Map CC CLI effort levels to Copilot reasoning_effort values.
- * CC CLI sends: low, medium, high, xhigh, max
+ * CC CLI exposes "max" in its UI but transparently maps it to "xhigh" before
+ * sending. The "max" branch below is kept for defense / non-CC clients.
  * Copilot accepts: low, medium, high, xhigh
  */
 function mapEffortToReasoningEffort(effort: string): string | undefined {
@@ -100,103 +107,94 @@ function mapEffortToReasoningEffort(effort: string): string | undefined {
   }
 }
 
+const ONE_M_SUFFIX_RE = /-1m(?:-internal)?$/
+
+function is1MVariant(model: string): boolean {
+  return ONE_M_SUFFIX_RE.test(model)
+}
+
 /**
- * Translate Anthropic/Claude model names to the format expected by Copilot backend.
+ * Translate Anthropic/Claude model names to the format expected by Copilot
+ * backend.
  *
- * 1:1 mapping driven by client intent:
- *   - If the client signals 1M context (via [1m] suffix in model name OR via the
- *     `context-1m-2025-08-07` anthropic-beta header), we promote to the `-1m` /
- *     `-1m-internal` variant when present in the Copilot model list.
- *   - Otherwise we keep the standard 200K variant. We do NOT silently upgrade
- *     non-1M requests, because that breaks calls like the API-key verification
- *     probe that intentionally use the small/standard model.
+ * Resolution rules (in order):
+ *   1. Normalize input format: strip [1m] suffix, convert dash-major-minor to
+ *      dotted form (claude-opus-4-7 → claude-opus-4.7), drop date suffixes.
+ *   2. If the normalized name is already a 1M variant (-1m or -1m-internal),
+ *      keep it as-is.
+ *   3. If the Copilot model list advertises a 1M variant for this base model,
+ *      always route to it. CC CLI no longer sends a 1M signal for newer models
+ *      (e.g. claude-opus-4.7), so we cannot rely on header detection — we
+ *      simply prefer the larger context window whenever it's available.
+ *   4. Otherwise return the base model.
+ *
+ * Effort-specific 200K variants (claude-opus-4.7-high / -xhigh) are intentionally
+ * never produced here — once a base model has a 1M variant, we always route to
+ * 1M and rely on the reasoning_effort parameter to convey effort.
  */
-export function translateModelName(
-  model: string,
-  options?: { wants1M?: boolean; effort?: string },
-): string {
+export function translateModelName(model: string): string {
   const hasBracketSuffix = model.endsWith("[1m]")
-  const wants1M = options?.wants1M === true || hasBracketSuffix
+  const stripped = hasBracketSuffix ? model.slice(0, -4) : model
 
-  // Strip Claude Code's [1m] context window suffix if present
-  const name = hasBracketSuffix ? model.slice(0, -4) : model
+  const normalized = normalizeToDottedForm(stripped)
 
-  let result: string
+  // Already a 1M variant — keep as-is.
+  if (is1MVariant(normalized)) {
+    return normalized
+  }
 
+  // Strip any -1m suffix first (defensive: stale config could feed us one).
+  const base = normalized.replace(ONE_M_SUFFIX_RE, "")
+
+  // Always prefer the 1M variant when Copilot advertises one.
+  const oneMVariant = find1MVariant(base)
+  if (oneMVariant) {
+    return oneMVariant
+  }
+
+  return base
+}
+
+/**
+ * Convert input model name to Copilot's dotted format, stripping date suffixes.
+ *   claude-opus-4-7              → claude-opus-4.7
+ *   claude-opus-4-6-20260101     → claude-opus-4.6
+ *   claude-opus-4.6              → claude-opus-4.6 (passthrough)
+ *   claude-sonnet-4-20250514     → claude-sonnet-4 (date-only suffix)
+ *   gpt-4o                       → gpt-4o (passthrough)
+ */
+function normalizeToDottedForm(name: string): string {
   if (/\.\d/.test(name)) {
-    // Already in dotted format (e.g. claude-opus-4.6) — pass through
-    result = name
-  } else {
-    // Try: claude-{family}-{major}-{minor}[-date][-suffix]
-    const m = name.match(
-      /^(claude-(?:opus|sonnet|haiku)-\d+)-(\d{1,2})(?:-\d{6,})?(-.*)?$/,
-    )
-    if (m) {
-      result = `${m[1]}.${m[2]}${m[3] || ""}`
-    } else {
-      // Try: claude-{family}-{major}-{date} (no minor version)
-      const m2 = name.match(/^(claude-(?:opus|sonnet|haiku)-\d+)-\d{6,}$/)
-      result = m2 ? m2[1] : name
-    }
+    // Already in dotted format
+    return name
   }
 
-  // If client did not request 1M, keep the standard variant.
-  // If the input was already a 1m variant, strip it back down.
-  if (!wants1M) {
-    const base = result.replace(/-1m(?:-internal)?$/, "")
-    // Promote to effort-specific model variant (e.g. claude-opus-4.7-high)
-    // when not using 1M context. 1M requests always use the -1m-internal
-    // variant and rely on reasoning_effort param instead.
-    return promoteModelByEffort(base, options?.effort)
+  // Try: claude-{family}-{major}-{minor}[-date][-suffix]
+  const m = name.match(
+    /^(claude-(?:opus|sonnet|haiku)-\d+)-(\d{1,2})(?:-\d{6,})?(-.*)?$/,
+  )
+  if (m) {
+    return `${m[1]}.${m[2]}${m[3] || ""}`
   }
 
-  // Client wants 1M: promote to -1m / -1m-internal variant if available.
-  const base = result.replace(/-1m(?:-internal)?$/, "")
-  if (base !== result) {
-    return result // already a 1m variant
-  }
+  // Try: claude-{family}-{major}-{date} (no minor version)
+  const m2 = name.match(/^(claude-(?:opus|sonnet|haiku)-\d+)-\d{6,}$/)
+  return m2 ? m2[1] : name
+}
+
+/**
+ * Look up a 1M variant for the given base model in the Copilot model list.
+ * Prefers `-1m` over `-1m-internal` when both exist. Returns undefined if no
+ * 1M variant is advertised or the model list is not loaded.
+ */
+function find1MVariant(base: string): string | undefined {
   for (const suffix of ["-1m", "-1m-internal"]) {
     const candidate = base + suffix
     if (state.models?.data.some((m) => m.id === candidate)) {
       return candidate
     }
   }
-
-  return result
-}
-
-/**
- * Promote a base model to an effort-specific variant if available in the
- * Copilot model list. Only applies to non-1M models — 1M models don't have
- * effort-specific variants (e.g. no claude-opus-4.7-1m-internal-high).
- *
- * Mapping:
- *   high  → base-high   (e.g. claude-opus-4.7-high)
- *   xhigh / max → base-xhigh (e.g. claude-opus-4.7-xhigh)
- *   low / medium / undefined → base (no promotion)
- */
-function promoteModelByEffort(
-  base: string,
-  effort: string | undefined,
-): string {
-  if (!effort) return base
-
-  const e = effort.toLowerCase()
-  let suffix: string | undefined
-  if (e === "high") {
-    suffix = "-high"
-  } else if (e === "xhigh" || e === "max") {
-    suffix = "-xhigh"
-  }
-
-  if (!suffix) return base
-
-  const candidate = base + suffix
-  if (state.models?.data.some((m) => m.id === candidate)) {
-    return candidate
-  }
-
-  return base
+  return undefined
 }
 
 function translateAnthropicMessagesToOpenAI(
