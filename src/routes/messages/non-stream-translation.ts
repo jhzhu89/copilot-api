@@ -217,13 +217,62 @@ function translateAnthropicMessagesToOpenAI(
 ): Array<Message> {
   const systemMessages = handleSystemPrompt(system)
 
-  const otherMessages = anthropicMessages.flatMap((message) =>
-    message.role === "user" ?
-      handleUserMessage(message)
-    : handleAssistantMessage(message),
-  )
+  // CC CLI sometimes injects `role: "system"` items into the messages array
+  // (e.g. <system-reminder> nudges that arrive mid-conversation). The Anthropic
+  // Messages API technically only allows user/assistant in the array, but we
+  // need to handle this real-world payload shape. Dropping these messages or
+  // routing them into the assistant branch is harmful — when such a message
+  // ends up last, the resulting OpenAI payload has a trailing assistant turn,
+  // which the upstream rejects with "This model does not support assistant
+  // message prefill". OpenAI/Copilot accept mid-stream `role: "system"`
+  // messages natively, so we pass them through.
+  const otherMessages = anthropicMessages.flatMap((message) => {
+    // Cast to widen the role union — real-world payloads include "system" and
+    // potentially other roles that aren't in the AnthropicMessage type.
+    const role = (message as { role: string }).role
+    if (role === "user")
+      return handleUserMessage(message as AnthropicUserMessage)
+    if (role === "assistant")
+      return handleAssistantMessage(message as AnthropicAssistantMessage)
+    // role === "system" (or any other unexpected role from non-conforming
+    // clients): wrap as an OpenAI system message. mapContent handles both
+    // string and structured-block content, mirroring how user/assistant
+    // messages are normalized.
+    return handleInlineSystemMessage(
+      message as { role: string; content: unknown },
+    )
+  })
 
   return [...systemMessages, ...otherMessages]
+}
+
+function handleInlineSystemMessage(message: {
+  role: string
+  content: unknown
+}): Array<Message> {
+  // mapContent expects the AnthropicUserContentBlock | AnthropicAssistantContentBlock
+  // union; system messages from CC CLI carry either a plain string or simple
+  // text blocks (same shape as user text), so we reuse mapContent and coerce.
+  const mapped = mapContent(
+    message.content as
+      | string
+      | Array<AnthropicUserContentBlock | AnthropicAssistantContentBlock>,
+  )
+  // OpenAI system message content must be string or null (not a parts array).
+  // If the mapped result is a parts array (e.g. image present — vanishingly
+  // unlikely for a system reminder), flatten its text parts.
+  let content: string | null
+  if (typeof mapped === "string") {
+    content = mapped
+  } else if (Array.isArray(mapped)) {
+    content = mapped
+      .filter((p): p is TextPart => p.type === "text")
+      .map((p) => p.text)
+      .join("\n\n")
+  } else {
+    content = mapped
+  }
+  return content === null ? [] : [{ role: "system", content }]
 }
 
 function handleSystemPrompt(

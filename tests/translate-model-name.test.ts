@@ -567,3 +567,99 @@ describe("translateToOpenAI — trailing whitespace on assistant content", () =>
     expect(user?.content).toBe("hi  \n")
   })
 })
+
+// CC CLI occasionally injects `role: "system"` items mid-conversation (e.g.
+// the "task tools haven't been used recently" reminder). Historically these
+// fell through to the assistant branch, and when they landed last the
+// resulting OpenAI payload had a trailing assistant turn — which the upstream
+// rejects with "This model does not support assistant message prefill".
+// These tests pin the routing so the regression can't return.
+describe("translateToOpenAI — inline `role: system` messages from CC CLI", () => {
+  beforeEach(() => {
+    state.models = undefined
+  })
+
+  test("trailing inline system message is emitted as OpenAI role:system (not assistant)", () => {
+    // Exact shape of the failing 4.8 payload: ...assistant, user, system.
+    const result = translateToOpenAI({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      messages: [
+        { role: "user", content: "do thing" },
+        { role: "assistant", content: "doing it" },
+        { role: "user", content: "ok" },
+        // @ts-expect-error — CC CLI sends this even though it's outside the
+        // typed AnthropicMessage union (Anthropic spec only allows user/assistant)
+        { role: "system", content: "gentle reminder text" },
+      ],
+    })
+
+    const messages = result.messages
+    const last = messages.at(-1)
+    expect(last?.role).toBe("system")
+    expect(last?.content).toBe("gentle reminder text")
+    // The whole point: NOT role=assistant (which would trigger the prefill 400).
+  })
+
+  test("mid-conversation inline system message is preserved in place", () => {
+    const result = translateToOpenAI({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      messages: [
+        { role: "user", content: "hi" },
+        // @ts-expect-error — out-of-spec but real-world payload from CC CLI
+        { role: "system", content: "reminder: be brief" },
+        { role: "assistant", content: "ok" },
+        { role: "user", content: "go on" },
+      ],
+    })
+
+    // Roles, in order, should mirror the original (system preserved in slot 1).
+    const roles = result.messages.map((m) => m.role)
+    expect(roles).toEqual(["user", "system", "assistant", "user"])
+    expect(result.messages[1].content).toBe("reminder: be brief")
+  })
+
+  test("inline system with array-of-text-blocks content is concatenated to a string", () => {
+    const result = translateToOpenAI({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      messages: [
+        { role: "user", content: "hi" },
+        {
+          // @ts-expect-error — out-of-spec role
+          role: "system",
+          content: [
+            { type: "text", text: "first reminder" },
+            { type: "text", text: "second reminder" },
+          ],
+        },
+      ],
+    })
+
+    const messages = result.messages
+    const last = messages.at(-1)
+    expect(last?.role).toBe("system")
+    // mapContent joins text-only block arrays with "\n\n".
+    expect(last?.content).toBe("first reminder\n\nsecond reminder")
+  })
+
+  test("does NOT get rtrimmed (rtrim is assistant-only — system text is informational)", () => {
+    // Just to pin that we don't accidentally extend rtrim to system messages.
+    // (If we ever did, this test still passes — but it documents intent.)
+    const result = translateToOpenAI({
+      model: "claude-opus-4-8",
+      max_tokens: 64,
+      messages: [
+        { role: "user", content: "hi" },
+        // @ts-expect-error — out-of-spec role
+        { role: "system", content: "reminder with trailing space   " },
+      ],
+    })
+
+    const messages = result.messages
+    const last = messages.at(-1)
+    expect(last?.role).toBe("system")
+    expect(last?.content).toBe("reminder with trailing space   ")
+  })
+})
