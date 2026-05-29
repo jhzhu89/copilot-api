@@ -68,6 +68,18 @@ export async function handleCompletion(c: Context) {
     (m) => m.id === openAIPayload.model,
   )
   if (selectedModel) {
+    // Empirically: opus-4.8 only advertises reasoning_effort: ["medium"].
+    // Sending "high"/"xhigh"/"low" gets a 400 invalid_reasoning_effort upstream.
+    // Surface this as a clean Anthropic-format error so CC CLI users know to
+    // change their reasoning level rather than seeing an opaque upstream error.
+    const effortError = checkReasoningEffortSupport(
+      openAIPayload,
+      selectedModel,
+    )
+    if (effortError) {
+      return c.json(effortError, 400)
+    }
+
     const tokenError = await checkPromptTokenLimit(openAIPayload, selectedModel)
     if (tokenError) {
       return c.json(tokenError, 400)
@@ -162,6 +174,45 @@ async function checkPromptTokenLimit(
   }
 
   return null
+}
+
+/**
+ * If the payload carries a `reasoning_effort` value that the resolved model
+ * doesn't advertise, return an Anthropic-format 400 error object. This mirrors
+ * the upstream Copilot validation (claude-opus-4.8 only supports ["medium"])
+ * but surfaces the error in the format the client expects, so users see
+ * "reasoning_effort 'xhigh' is not supported by model claude-opus-4.8;
+ * supported values: [medium]" instead of a raw passthrough.
+ *
+ * Returns null when no effort is set, the model doesn't declare a support list,
+ * or the effort is in the supported list.
+ */
+function checkReasoningEffortSupport(
+  payload: ChatCompletionsPayload,
+  model: Model,
+): {
+  type: string
+  error: { type: string; message: string }
+} | null {
+  const effort = payload.reasoning_effort
+  if (!effort) return null
+
+  const supported = model.capabilities.supports?.reasoning_effort
+  // No support list declared → can't validate, let upstream decide.
+  if (!supported || supported.length === 0) return null
+
+  if (supported.includes(effort)) return null
+
+  consola.warn(
+    `reasoning_effort "${effort}" rejected for model ${model.id}; supported: [${supported.join(", ")}]`,
+  )
+  return {
+    type: "error",
+    error: {
+      type: "invalid_request_error",
+      message: `reasoning_effort "${effort}" is not supported by model ${model.id}; supported values: [${supported.join(", ")}]. Lower the reasoning level on your client.`,
+    },
+  }
 }
 
 const isNonStreaming = (

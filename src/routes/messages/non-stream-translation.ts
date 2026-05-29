@@ -64,14 +64,28 @@ export function translateToOpenAI(
     }
   }
 
-  // 1M model variants don't have effort-specific sub-variants (e.g. there is no
-  // claude-opus-4.7-1m-internal-xhigh). Effort is conveyed via the
-  // reasoning_effort parameter on the request body instead. Trigger this whenever
-  // the resolved model is a 1M variant — regardless of how we got there.
-  if (is1MVariant(resolvedModel) && options?.effort) {
+  // Set reasoning_effort whenever the resolved model advertises that it accepts
+  // the parameter. Historically this was gated on `is1MVariant` because the only
+  // "single model, varies effort via parameter" models were the 1M variants
+  // (4.7-high / -xhigh were separate model IDs with baked-in effort). Starting
+  // with claude-opus-4.8 the base model itself accepts reasoning_effort (limited
+  // to ["medium"]), so the gate is now based on the advertised supports list.
+  //
+  // Validation that the requested effort is actually in the supported list
+  // happens in the handler via checkReasoningEffortSupport (so the client gets a
+  // clean 400 instead of an opaque upstream error).
+  if (options?.effort) {
     const mapped = mapEffortToReasoningEffort(options.effort)
     if (mapped) {
-      result.reasoning_effort = mapped
+      const modelInfo = state.models?.data.find((m) => m.id === resolvedModel)
+      const supports = modelInfo?.capabilities.supports?.reasoning_effort
+      if (supports && supports.length > 0) {
+        result.reasoning_effort = mapped
+      } else if (supports === undefined && is1MVariant(resolvedModel)) {
+        // Fallback for callers/tests where the model list isn't fully loaded
+        // (e.g. fixtures without `capabilities`): preserve historical behavior.
+        result.reasoning_effort = mapped
+      }
     }
   }
 
@@ -271,7 +285,7 @@ function handleAssistantMessage(
     return [
       {
         role: "assistant",
-        content: mapContent(message.content),
+        content: rtrimAssistantText(mapContent(message.content)),
       },
     ]
   }
@@ -288,11 +302,18 @@ function handleAssistantMessage(
     (block): block is AnthropicThinkingBlock => block.type === "thinking",
   )
 
-  // Combine text and thinking blocks, as OpenAI doesn't have separate thinking blocks
-  const allTextContent = [
-    ...textBlocks.map((b) => b.text),
-    ...thinkingBlocks.map((b) => b.thinking),
-  ].join("\n\n")
+  // Combine text and thinking blocks, as OpenAI doesn't have separate thinking blocks.
+  // Trim trailing whitespace: when this turn becomes the final assistant message
+  // (assistant prefill mode), Anthropic upstream rejects trailing whitespace with
+  // 400 "messages: final assistant content cannot end with trailing whitespace".
+  // Thinking blocks frequently end with "\n" or " ", so the join+rtrim is required
+  // to keep CC CLI's history replay working on opus-4.6 / 4.7 / 4.8.
+  const allTextContent = rtrimAssistantText(
+    [
+      ...textBlocks.map((b) => b.text),
+      ...thinkingBlocks.map((b) => b.thinking),
+    ].join("\n\n"),
+  )
 
   return toolUseBlocks.length > 0 ?
       [
@@ -312,9 +333,38 @@ function handleAssistantMessage(
     : [
         {
           role: "assistant",
-          content: mapContent(message.content),
+          content: rtrimAssistantText(mapContent(message.content)),
         },
       ]
+}
+
+/**
+ * Anthropic upstream (proxied through Copilot) rejects assistant messages whose
+ * content ends with whitespace when the assistant turn is the final message.
+ * We can't always tell at translation time whether a given assistant turn will
+ * end up being the final one (CC CLI replays history in many shapes), so we
+ * unconditionally rtrim assistant text. This is always safe — the upstream
+ * never wants trailing whitespace, and dropping it never changes meaning.
+ */
+function rtrimAssistantText<T extends string | Array<ContentPart> | null>(
+  content: T,
+): T {
+  if (typeof content === "string") {
+    return content.replace(/\s+$/u, "") as T
+  }
+  if (Array.isArray(content)) {
+    // Trim the last text part only — earlier whitespace is part of the
+    // structured content and may be load-bearing. Map preserves the array
+    // shape; we only rewrite the last text part we find.
+    const lastTextIdx = content.findLastIndex((part) => part.type === "text")
+    if (lastTextIdx === -1) return content
+    const trimmed: Array<ContentPart> = content.map((part, i) => {
+      if (i !== lastTextIdx || part.type !== "text") return part
+      return { type: "text", text: part.text.replace(/\s+$/u, "") }
+    })
+    return trimmed as T
+  }
+  return content
 }
 
 function mapContent(
