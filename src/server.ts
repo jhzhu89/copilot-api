@@ -2,6 +2,7 @@ import { Hono } from "hono"
 import { cors } from "hono/cors"
 import { logger } from "hono/logger"
 
+import { ensureModels } from "./lib/utils"
 import { completionRoutes } from "./routes/chat-completions/route"
 import { embeddingRoutes } from "./routes/embeddings/route"
 import { messageRoutes } from "./routes/messages/route"
@@ -14,6 +15,14 @@ export const server = new Hono()
 
 server.use(logger())
 server.use(cors())
+
+// Keep the model cache fresh (lazy, TTL-bounded refresh) before any route that
+// reads state.models runs. ensureModels returns immediately when the cache is
+// still fresh, so this adds no latency on the common path.
+server.use(async (_c, next) => {
+  await ensureModels()
+  await next()
+})
 
 server.get("/", (c) => c.text("Server running"))
 

@@ -2,17 +2,13 @@ import { Hono } from "hono"
 
 import { forwardError } from "~/lib/error"
 import { state } from "~/lib/state"
-import { cacheModels } from "~/lib/utils"
 
 export const modelRoutes = new Hono()
 
 modelRoutes.get("/", async (c) => {
   try {
-    if (!state.models) {
-      // This should be handled by startup logic, but as a fallback.
-      await cacheModels()
-    }
-
+    // Freshness is handled by the ensureModels middleware in server.ts; here we
+    // just serve whatever is currently cached.
     const models = state.models?.data.map((model) => {
       const { limits, supports, family, tokenizer } = model.capabilities
       return {

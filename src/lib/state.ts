@@ -6,6 +6,13 @@ export interface State {
 
   accountType: string
   models?: ModelsResponse
+  /**
+   * Epoch ms when `models` was last fetched from upstream. Used by
+   * `ensureModels` to lazily refresh the cache once it exceeds the TTL, so the
+   * proxy picks up newly-shipped models / changed capabilities without a
+   * restart.
+   */
+  modelsFetchedAt?: number
   vsCodeVersion?: string
 
   manualApprove: boolean
