@@ -370,14 +370,16 @@ describe("translateToOpenAI — reasoning_effort wiring", () => {
     expect(result.thinking?.budget_tokens).toBe(5000)
   })
 
-  // opus-4.8: empirically the base (and only) model now accepts reasoning_effort,
-  // limited to ["medium"]. The base 4.7 advertises ["medium"] too but historically
-  // we only set reasoning_effort on 1M variants — capability-aware gating preserves
-  // that behavior for 4.7 (no supports list in legacy fixtures) and unlocks it for 4.8.
+  // opus-4.8: empirically (api.githubcopilot.com/models, verified live) the base
+  // model accepts the full 5-level ladder: ["low","medium","high","xhigh","max"].
+  // Capability-aware gating honors any advertised value for it, while the base 4.7
+  // (no supports list in legacy fixtures) still falls through the 1M-suffix path.
+  const OPUS_48_EFFORTS = ["low", "medium", "high", "xhigh", "max"]
+
   test("sets reasoning_effort on opus-4.8 when supports list includes the value", () => {
     state.models = {
       object: "list",
-      data: [mkModelWithEffort("claude-opus-4.8", ["medium"])],
+      data: [mkModelWithEffort("claude-opus-4.8", OPUS_48_EFFORTS)],
     }
 
     const result = translateToOpenAI(mkPayload("claude-opus-4-8"), {
@@ -388,14 +390,10 @@ describe("translateToOpenAI — reasoning_effort wiring", () => {
     expect(result.reasoning_effort).toBe("medium")
   })
 
-  test("still passes through a non-medium effort on 4.8 (handler rejects, not translation)", () => {
-    // Translation layer is intentionally lenient: it only checks that the model
-    // advertises a supports list. The handler's checkReasoningEffortSupport is
-    // what returns the clean 400. Keeping concerns separate means the
-    // translation function stays pure / side-effect-free.
+  test("passes through a high effort on 4.8 (multi-value supports list)", () => {
     state.models = {
       object: "list",
-      data: [mkModelWithEffort("claude-opus-4.8", ["medium"])],
+      data: [mkModelWithEffort("claude-opus-4.8", OPUS_48_EFFORTS)],
     }
 
     const result = translateToOpenAI(mkPayload("claude-opus-4-8"), {
@@ -423,6 +421,91 @@ describe("translateToOpenAI — reasoning_effort wiring", () => {
 
     expect(result.model).toBe("claude-opus-4.7-1m-internal")
     expect(result.reasoning_effort).toBe("xhigh")
+  })
+
+  test("opus-4.8: routes effort=max to reasoning_effort=max when supported", () => {
+    state.models = {
+      object: "list",
+      data: [mkModelWithEffort("claude-opus-4.8", OPUS_48_EFFORTS)],
+    }
+
+    const result = translateToOpenAI(mkPayload("claude-opus-4.8"), {
+      effort: "max",
+    })
+
+    expect(result.model).toBe("claude-opus-4.8")
+    expect(result.reasoning_effort).toBe("max")
+  })
+
+  test("opus-4.8: routes effort=high to reasoning_effort=high", () => {
+    state.models = {
+      object: "list",
+      data: [mkModelWithEffort("claude-opus-4.8", OPUS_48_EFFORTS)],
+    }
+
+    const result = translateToOpenAI(mkPayload("claude-opus-4.8"), {
+      effort: "high",
+    })
+
+    expect(result.reasoning_effort).toBe("high")
+  })
+
+  test("falls back to highest available when requested effort isn't supported", () => {
+    // Model tops out at xhigh; user asks for max -> should land on xhigh.
+    state.models = {
+      object: "list",
+      data: [
+        mkModelWithEffort("claude-fictional-model", [
+          "low",
+          "medium",
+          "high",
+          "xhigh",
+        ]),
+      ],
+    }
+
+    const result = translateToOpenAI(mkPayload("claude-fictional-model"), {
+      effort: "max",
+    })
+
+    expect(result.reasoning_effort).toBe("xhigh")
+  })
+
+  test("skips reasoning_effort for effort-locked variants (single-value list)", () => {
+    // claude-opus-4.7-xhigh advertises only ["xhigh"] — effort is id-baked.
+    state.models = {
+      object: "list",
+      data: [mkModelWithEffort("claude-opus-4.7-xhigh", ["xhigh"])],
+    }
+
+    const result = translateToOpenAI(mkPayload("claude-opus-4.7-xhigh"), {
+      effort: "max",
+    })
+
+    expect(result.reasoning_effort).toBeUndefined()
+  })
+
+  test("cache-miss fallback: -1m variant honors effort, collapses max->xhigh", () => {
+    // No state.models loaded — exercises the legacy fallback path.
+    state.models = undefined
+
+    const result = translateToOpenAI(mkPayload("claude-opus-4.6-1m"), {
+      effort: "max",
+    })
+
+    expect(result.model).toBe("claude-opus-4.6-1m")
+    expect(result.reasoning_effort).toBe("xhigh")
+  })
+
+  test("cache-miss fallback: non-1M model drops effort", () => {
+    state.models = undefined
+
+    const result = translateToOpenAI(mkPayload("claude-opus-4.8"), {
+      effort: "max",
+    })
+
+    // No cache, no -1m suffix → can't safely send reasoning_effort.
+    expect(result.reasoning_effort).toBeUndefined()
   })
 })
 

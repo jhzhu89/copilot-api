@@ -36,6 +36,10 @@ export async function handleCompletion(c: Context) {
   }
 
   consola.debug("Anthropic request payload:", JSON.stringify(anthropicPayload))
+  consola.debug(
+    "Anthropic request headers:",
+    JSON.stringify(redactSensitiveHeaders(c.req.header())),
+  )
 
   // Detect whether the client requested 1M context via the anthropic-beta header.
   // CC CLI sends e.g. "context-1m-2025-08-07" for older models like opus-4.6.
@@ -68,10 +72,11 @@ export async function handleCompletion(c: Context) {
     (m) => m.id === openAIPayload.model,
   )
   if (selectedModel) {
-    // Empirically: opus-4.8 only advertises reasoning_effort: ["medium"].
-    // Sending "high"/"xhigh"/"low" gets a 400 invalid_reasoning_effort upstream.
-    // Surface this as a clean Anthropic-format error so CC CLI users know to
-    // change their reasoning level rather than seeing an opaque upstream error.
+    // Reject an effort the model doesn't advertise (checked against its live
+    // supports.reasoning_effort list) before hitting upstream. Effort-locked or
+    // no-reasoning models would otherwise return an opaque 400
+    // invalid_reasoning_effort; surface it as a clean Anthropic-format error so
+    // CC CLI users know to change their reasoning level.
     const effortError = checkReasoningEffortSupport(
       openAIPayload,
       selectedModel,
@@ -179,10 +184,11 @@ async function checkPromptTokenLimit(
 /**
  * If the payload carries a `reasoning_effort` value that the resolved model
  * doesn't advertise, return an Anthropic-format 400 error object. This mirrors
- * the upstream Copilot validation (claude-opus-4.8 only supports ["medium"])
- * but surfaces the error in the format the client expects, so users see
- * "reasoning_effort 'xhigh' is not supported by model claude-opus-4.8;
- * supported values: [medium]" instead of a raw passthrough.
+ * the upstream Copilot validation (e.g. an effort-locked variant like
+ * claude-opus-4.7-xhigh only supports ["xhigh"]) but surfaces the error in the
+ * format the client expects, so users see "reasoning_effort 'max' is not
+ * supported by model claude-opus-4.7-xhigh; supported values: [xhigh]" instead
+ * of a raw passthrough.
  *
  * Returns null when no effort is set, the model doesn't declare a support list,
  * or the effort is in the supported list.
@@ -218,3 +224,21 @@ function checkReasoningEffortSupport(
 const isNonStreaming = (
   response: Awaited<ReturnType<typeof createChatCompletions>>,
 ): response is ChatCompletionResponse => Object.hasOwn(response, "choices")
+
+// Headers whose values may carry secrets — blanked before debug-logging the
+// inbound request headers so verbose logs never persist credentials. CC CLI
+// doesn't send these today, but the Anthropic SDK can (x-api-key), so we redact
+// defensively.
+const SENSITIVE_HEADERS = new Set(["authorization", "x-api-key", "cookie"])
+
+function redactSensitiveHeaders(
+  headers: Record<string, string | undefined>,
+): Record<string, string | undefined> {
+  return Object.fromEntries(
+    Object.entries(headers).map(([key, value]) =>
+      SENSITIVE_HEADERS.has(key.toLowerCase()) ?
+        [key, "[redacted]"]
+      : [key, value],
+    ),
+  )
+}

@@ -64,28 +64,17 @@ export function translateToOpenAI(
     }
   }
 
-  // Set reasoning_effort whenever the resolved model advertises that it accepts
-  // the parameter. Historically this was gated on `is1MVariant` because the only
-  // "single model, varies effort via parameter" models were the 1M variants
-  // (4.7-high / -xhigh were separate model IDs with baked-in effort). Starting
-  // with claude-opus-4.8 the base model itself accepts reasoning_effort (limited
-  // to ["medium"]), so the gate is now based on the advertised supports list.
-  //
-  // Validation that the requested effort is actually in the supported list
-  // happens in the handler via checkReasoningEffortSupport (so the client gets a
-  // clean 400 instead of an opaque upstream error).
+  // Convey effort via the reasoning_effort parameter whenever the resolved
+  // model advertises a multi-value reasoning_effort list (covers all 1M
+  // variants, claude-opus-4.8, claude-sonnet-4.6, etc). Effort-locked variants
+  // like claude-opus-4.7-xhigh advertise a single-value list and are skipped —
+  // their effort is baked into the model id. When the model isn't in the
+  // cached list, fall back to the legacy 1M-suffix heuristic so we don't
+  // silently drop effort for unknown models.
   if (options?.effort) {
-    const mapped = mapEffortToReasoningEffort(options.effort)
+    const mapped = mapEffortToReasoningEffort(resolvedModel, options.effort)
     if (mapped) {
-      const modelInfo = state.models?.data.find((m) => m.id === resolvedModel)
-      const supports = modelInfo?.capabilities.supports?.reasoning_effort
-      if (supports && supports.length > 0) {
-        result.reasoning_effort = mapped
-      } else if (supports === undefined && is1MVariant(resolvedModel)) {
-        // Fallback for callers/tests where the model list isn't fully loaded
-        // (e.g. fixtures without `capabilities`): preserve historical behavior.
-        result.reasoning_effort = mapped
-      }
+      result.reasoning_effort = mapped
     }
   }
 
@@ -93,32 +82,85 @@ export function translateToOpenAI(
 }
 
 /**
- * Map CC CLI effort levels to Copilot reasoning_effort values.
- * CC CLI exposes "max" in its UI but transparently maps it to "xhigh" before
- * sending. The "max" branch below is kept for defense / non-CC clients.
- * Copilot accepts: low, medium, high, xhigh
+ * Map CC CLI effort levels to a Copilot reasoning_effort value the resolved
+ * model actually accepts. Returns undefined when the model doesn't support
+ * runtime effort selection (single-value or absent supports.reasoning_effort
+ * list, and not a known 1M variant).
+ *
+ * The 5-level ladder Copilot exposes for newer models is:
+ *   low < medium < high < xhigh < max
+ * CC CLI's "max" used to be a UI alias for "xhigh"; Copilot now accepts "max"
+ * as a real value on models that advertise it (opus-4.8, opus-4.7, etc).
  */
-function mapEffortToReasoningEffort(effort: string): string | undefined {
-  switch (effort.toLowerCase()) {
-    case "low": {
-      return "low"
-    }
-    case "medium": {
-      return "medium"
-    }
-    case "high": {
-      return "high"
-    }
-    case "xhigh": {
-      return "xhigh"
-    }
+function mapEffortToReasoningEffort(
+  resolvedModel: string,
+  effort: string,
+): string | undefined {
+  const normalized = effort.toLowerCase()
+
+  const supported = getSupportedEfforts(resolvedModel)
+  if (!supported) {
+    // Unknown model: legacy behavior — only honor effort for 1M variants and
+    // collapse "max" to "xhigh" (the safe pre-4.8 ceiling).
+    if (!is1MVariant(resolvedModel)) return undefined
+    return normalized === "max" ? "xhigh" : passthroughEffort(normalized)
+  }
+
+  // Effort-locked variants (single-value list) bake effort into the id; don't
+  // override it.
+  if (supported.length <= 1) return undefined
+
+  // Walk the requested level down to the highest available the model accepts.
+  // Order matters: a user asking for "max" on a model that tops out at "xhigh"
+  // should land on "xhigh", not silently drop.
+  const fallbackChain = effortFallbackChain(normalized)
+  for (const candidate of fallbackChain) {
+    if (supported.includes(candidate)) return candidate
+  }
+  return undefined
+}
+
+function passthroughEffort(effort: string): string | undefined {
+  switch (effort) {
+    case "low":
+    case "medium":
+    case "high":
+    case "xhigh":
     case "max": {
-      return "xhigh"
+      return effort
     }
     default: {
       return undefined
     }
   }
+}
+
+function effortFallbackChain(effort: string): Array<string> {
+  switch (effort) {
+    case "max": {
+      return ["max", "xhigh", "high", "medium", "low"]
+    }
+    case "xhigh": {
+      return ["xhigh", "high", "medium", "low"]
+    }
+    case "high": {
+      return ["high", "medium", "low"]
+    }
+    case "medium": {
+      return ["medium", "low"]
+    }
+    case "low": {
+      return ["low"]
+    }
+    default: {
+      return []
+    }
+  }
+}
+
+function getSupportedEfforts(model: string): Array<string> | undefined {
+  const entry = state.models?.data.find((m) => m.id === model)
+  return entry?.capabilities.supports?.reasoning_effort
 }
 
 const ONE_M_SUFFIX_RE = /-1m(?:-internal)?$/
