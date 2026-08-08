@@ -18,10 +18,60 @@ interface ResponsesPayload {
   [key: string]: unknown
 }
 
+type AdditionalToolsInput = Record<string, unknown> & {
+  tools: Array<unknown>
+}
+
+type EmptyNamespaceTool = Record<string, unknown> & {
+  name: string
+  description: string
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null
+}
+
+function isAdditionalToolsInput(value: unknown): value is AdditionalToolsInput {
+  return (
+    isRecord(value)
+    && value.type === "additional_tools"
+    && Array.isArray(value.tools)
+  )
+}
+
+function isEmptyNamespaceTool(value: unknown): value is EmptyNamespaceTool {
+  return (
+    isRecord(value)
+    && value.type === "namespace"
+    && typeof value.name === "string"
+    && typeof value.description === "string"
+    && value.description.trim().length === 0
+  )
+}
+
+export function normalizeResponsesPayload<T extends ResponsesPayload>(
+  payload: T,
+): T {
+  if (!Array.isArray(payload.input)) return payload
+
+  for (const inputItem of payload.input as Array<unknown>) {
+    if (!isAdditionalToolsInput(inputItem)) continue
+
+    for (const tool of inputItem.tools) {
+      if (isEmptyNamespaceTool(tool)) {
+        tool.description = `Tools in the ${tool.name} namespace.`
+      }
+    }
+  }
+
+  return payload
+}
+
 export async function handleResponses(c: Context) {
   await checkRateLimit(state)
 
   const payload = await c.req.json<ResponsesPayload>()
+  normalizeResponsesPayload(payload)
   consola.debug(
     "Responses request payload:",
     JSON.stringify(payload).slice(-400),
