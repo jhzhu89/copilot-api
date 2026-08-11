@@ -87,6 +87,47 @@ export const sanitizeResponsesPayload = (
   }
 }
 
+const CONNECTION_MISMATCH_ERROR =
+  "input item does not belong to this connection"
+
+const isConnectionMismatchResponse = async (response: Response) =>
+  response.status === 401
+  && (await response.clone().text()).includes(CONNECTION_MISMATCH_ERROR)
+
+const removeReasoningItems = (payload: ResponsesPayload): ResponsesPayload => {
+  if (!Array.isArray(payload.input)) return payload
+
+  const input = (payload.input as Array<unknown>).filter(
+    (item) => !isRecord(item) || item.type !== "reasoning",
+  )
+  return input.length === payload.input.length ? payload : { ...payload, input }
+}
+
+const createResponse = (payload: ResponsesPayload) => {
+  const body = JSON.stringify(payload)
+  return copilotFetch(`${copilotBaseUrl(state)}/responses`, () => ({
+    method: "POST",
+    headers: {
+      ...copilotHeaders(state),
+      "X-Initiator": "agent",
+    },
+    body,
+  }))
+}
+
+const recoverConnectionMismatch = async (
+  response: Response,
+  payload: ResponsesPayload,
+) => {
+  if (!(await isConnectionMismatchResponse(response))) return response
+
+  const fallbackPayload = removeReasoningItems(payload)
+  if (fallbackPayload === payload) return response
+
+  consola.warn("Retrying response without stale reasoning history")
+  return createResponse(fallbackPayload)
+}
+
 export async function handleResponses(c: Context) {
   await checkRateLimit(state)
 
@@ -102,19 +143,10 @@ export async function handleResponses(c: Context) {
 
   if (!state.copilotToken) throw new Error("Copilot token not found")
 
-  const body = JSON.stringify(payload)
   const isStreaming = payload.stream === true
-
-  const response = await copilotFetch(
-    `${copilotBaseUrl(state)}/responses`,
-    () => ({
-      method: "POST",
-      headers: {
-        ...copilotHeaders(state),
-        "X-Initiator": "agent",
-      },
-      body,
-    }),
+  const response = await recoverConnectionMismatch(
+    await createResponse(payload),
+    payload,
   )
 
   if (!response.ok) {
