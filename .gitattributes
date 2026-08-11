@@ -1,0 +1,4 @@
+# Prettier expects LF even when Git for Windows enables core.autocrlf.
+*.ts text eol=lf
+*.js text eol=lf
+*.json text eol=lf

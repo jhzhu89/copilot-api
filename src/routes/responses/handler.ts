@@ -115,6 +115,9 @@ const createResponse = (payload: ResponsesPayload) => {
   }))
 }
 
+// This machine once routed one persisted Codex session across independent
+// Windows and WSL proxy instances. A stable single-proxy setup should not hit
+// this path; keep recovery gated to Copilot's exact connection-mismatch error.
 const recoverConnectionMismatch = async (
   response: Response,
   payload: ResponsesPayload,
