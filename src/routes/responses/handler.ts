@@ -28,7 +28,7 @@ type EmptyNamespaceTool = Record<string, unknown> & {
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null
+  return typeof value === "object" && value !== null && !Array.isArray(value)
 }
 
 function isAdditionalToolsInput(value: unknown): value is AdditionalToolsInput {
@@ -67,11 +67,32 @@ export function normalizeResponsesPayload<T extends ResponsesPayload>(
   return payload
 }
 
+export const sanitizeResponsesPayload = (
+  payload: ResponsesPayload,
+): ResponsesPayload => {
+  if (payload.store === true || !Array.isArray(payload.input)) return payload
+  const inputItems = payload.input as Array<unknown>
+
+  return {
+    ...payload,
+    input: inputItems.flatMap((item) => {
+      if (!isRecord(item)) return item
+      if (item.type === "item_reference") return []
+
+      const sanitizedItem = { ...item }
+      delete sanitizedItem.id
+      delete sanitizedItem.status
+      return sanitizedItem
+    }),
+  }
+}
+
 export async function handleResponses(c: Context) {
   await checkRateLimit(state)
 
-  const payload = await c.req.json<ResponsesPayload>()
-  normalizeResponsesPayload(payload)
+  const payload = sanitizeResponsesPayload(
+    normalizeResponsesPayload(await c.req.json<ResponsesPayload>()),
+  )
   consola.debug(
     "Responses request payload:",
     JSON.stringify(payload).slice(-400),
